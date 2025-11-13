@@ -27,9 +27,24 @@ export async function connectToDatabase() {
   }
 
   if (!clientPromise) {
-    const client = new MongoClient(MONGODB_URI, {
-      serverSelectionTimeoutMS: 5000
-    });
+    const mongoOptions = {
+      serverSelectionTimeoutMS:
+        Number.parseInt(process.env.MONGODB_SERVER_SELECTION_TIMEOUT_MS, 10) || 5000
+    };
+
+    if (process.env.MONGODB_DIRECT_CONNECTION === 'true') {
+      mongoOptions.directConnection = true;
+    }
+
+    if (process.env.MONGODB_TLS_ALLOW_INVALID_CERTS === 'true') {
+      mongoOptions.tlsAllowInvalidCertificates = true;
+    }
+
+    if (process.env.MONGODB_TLS_CA_FILE) {
+      mongoOptions.tlsCAFile = process.env.MONGODB_TLS_CA_FILE;
+    }
+
+    const client = new MongoClient(MONGODB_URI, mongoOptions);
 
     clientPromise = client
       .connect()
@@ -40,11 +55,45 @@ export async function connectToDatabase() {
       })
       .catch((error) => {
         clientPromise = null;
+        if (isTlsHandshakeError(error)) {
+          const hint =
+            'Atlas відхилив TLS-з’єднання. Додайте в .env параметр MONGODB_TLS_CA_FILE або ' +
+            'MONGODB_TLS_ALLOW_INVALID_CERTS=true, щоб використати власний сертифікат або тимчасово ' +
+            'вимкнути перевірку.';
+          throw new MongoConfigurationError(`${hint}\n${error.message}`);
+        }
+
         throw error;
       });
   }
 
   return clientPromise;
+}
+
+function isTlsHandshakeError(error) {
+  const tlsErrorCodes = new Set([
+    'ERR_SSL_TLSV1_ALERT_INTERNAL_ERROR',
+    'ERR_SSL_CERTIFICATE',
+    'ERR_SSL_SELF_SIGNED_CERT_IN_CHAIN'
+  ]);
+
+  const visit = (value) => {
+    if (!value || typeof value !== 'object') {
+      return null;
+    }
+
+    if (value.code && tlsErrorCodes.has(value.code)) {
+      return value.code;
+    }
+
+    if (value.cause) {
+      return visit(value.cause);
+    }
+
+    return null;
+  };
+
+  return Boolean(visit(error));
 }
 
 export function getDb() {
