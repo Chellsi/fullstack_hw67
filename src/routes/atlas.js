@@ -114,6 +114,132 @@ atlasRouter.get('/api/documents', async (req, res, next) => {
   }
 });
 
+atlasRouter.get('/api/documents/stream', async (req, res, next) => {
+  let cursor;
+
+  try {
+    const { collection } = await resolveCollection();
+    const filter = parseJsonParam(req.query.filter, {});
+    const projection = parseJsonParam(req.query.projection, undefined);
+    const limit = req.query.limit ? Math.max(Math.min(parseInt(req.query.limit, 10) || 0, 1000), 0) : 0;
+    const batchSize = req.query.batchSize
+      ? Math.max(Math.min(parseInt(req.query.batchSize, 10) || 0, 500), 1)
+      : undefined;
+
+    const findOptions = {};
+
+    if (projection !== undefined) {
+      findOptions.projection = projection;
+    }
+
+    if (batchSize !== undefined) {
+      findOptions.batchSize = batchSize;
+    }
+
+    cursor = collection.find(filter, findOptions);
+
+    if (limit > 0) {
+      cursor.limit(limit);
+    }
+
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.write('{"documents":[');
+
+    let count = 0;
+    let isFirst = true;
+
+    for await (const document of cursor) {
+      const serialized = JSON.stringify(document);
+      res.write((isFirst ? '' : ',') + serialized);
+      isFirst = false;
+      count += 1;
+    }
+
+    res.write(`],"count":${count}}`);
+    res.end();
+  } catch (error) {
+    if (cursor) {
+      await cursor.close();
+    }
+
+    if (error.status === 400) {
+      res.status(400).json({ error: error.message });
+      return;
+    }
+
+    next(error);
+    return;
+  }
+
+  if (cursor) {
+    await cursor.close();
+  }
+});
+
+atlasRouter.get('/api/documents/stats', async (req, res, next) => {
+  try {
+    const { collection } = await resolveCollection();
+    const match = parseJsonParam(req.query.match, {});
+    const groupBy = req.query.groupBy || null;
+    const avgField = req.query.avgField || null;
+    const sumField = req.query.sumField || null;
+    const uniqueField = req.query.uniqueField || null;
+
+    const pipeline = [];
+
+    if (match && Object.keys(match).length > 0) {
+      pipeline.push({ $match: match });
+    }
+
+    const groupStage = {
+      _id: groupBy ? `$${groupBy}` : null,
+      count: { $sum: 1 }
+    };
+
+    if (avgField) {
+      groupStage.average = { $avg: `$${avgField}` };
+    }
+
+    if (sumField) {
+      groupStage.total = { $sum: `$${sumField}` };
+    }
+
+    if (uniqueField) {
+      groupStage.uniqueValues = { $addToSet: `$${uniqueField}` };
+    }
+
+    pipeline.push({ $group: groupStage });
+
+    if (uniqueField) {
+      pipeline.push({
+        $project: {
+          _id: 1,
+          count: 1,
+          average: 1,
+          total: 1,
+          uniqueCount: { $size: '$uniqueValues' }
+        }
+      });
+    }
+
+    pipeline.push({ $sort: { count: -1 } });
+
+    const results = await collection.aggregate(pipeline).toArray();
+
+    res.json({
+      pipeline,
+      results
+    });
+  } catch (error) {
+    if (error.status === 400) {
+      res.status(400).json({ error: error.message });
+      return;
+    }
+
+    next(error);
+  }
+});
+
 atlasRouter.post('/api/documents', async (req, res, next) => {
   try {
     const { collection } = await resolveCollection();
